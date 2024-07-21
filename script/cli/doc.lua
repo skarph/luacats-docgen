@@ -15,8 +15,116 @@ local getLabel = require 'core.hover.label'
 local doc2md   = require 'cli.doc2md'
 local progress = require 'progress'
 local fs       = require 'bee.filesystem'
+local getCommit= require 'gitfinder'
 
 local export = {}
+
+--[[
+local function newDocEntry(set, source)
+
+    -- class/type --
+    local result = {
+        name    = global.name,
+        type    = 'type',
+        desc    = nil,
+        rawdesc = nil,
+        defines = {},
+        fields  = {},
+    }
+
+    --for each place where this class is defined:
+    result.defines[#result.defines+1] = {
+        type    = set.type,
+        file    = guide.getUri(set),
+        start   = set.start,
+        finish  = set.finish,
+        extends = getExtends(set),
+    }
+    result.desc = result.desc or getDesc(set) --gets reset every new time its found?
+    result.rawdesc = result.rawdesc or getDesc(set, true) --gets reset every new time its found?
+
+    --for each field (nonfunction) in class:
+    local field = {}
+    result.fields[#result.fields+1] = field
+    if source.field.type == 'doc.field.name' then
+        field.name = source.field[1]
+    else
+        field.name = ('[%s]'):format(vm.getInfer(source.field):view(ws.rootUri))
+    end
+    field.type    = source.type
+    field.file    = guide.getUri(source)
+    field.start   = source.start
+    field.finish  = source.finish
+    field.desc    = getDesc(source)
+    field.rawdesc = getDesc(source, true)
+    field.extends = packObject(source.extends)
+    field.visible = vm.getVisibleType(source)
+
+    --for each method (function) in class:
+    local field = {}
+    result.fields[#result.fields+1] = field
+    field.name    = (source.field or source.method)[1]
+    field.type    = source.type
+    field.file    = guide.getUri(source)
+    field.start   = source.start
+    field.finish  = source.finish
+    field.desc    = getDesc(source)
+    field.rawdesc = getDesc(source, true)
+    field.extends = packObject(source.value)
+    field.visible = vm.getVisibleType(source)
+    if vm.isAsync(source, true) then
+        field.async = true
+    end
+    local depr = vm.getDeprecated(source)
+    if (depr and not depr.versions) then
+        field.deprecated = true
+    end
+
+    --for each table index (unused???) in class:
+    local field = {}
+    result.fields[#result.fields+1] = field
+    field.name    = source.index[1]
+    field.type    = source.type
+    field.file    = guide.getUri(source)
+    field.start   = source.start
+    field.finish  = source.finish
+    field.desc    = getDesc(source)
+    field.rawdesc = getDesc(source, true)
+    field.extends = packObject(source.value)
+    field.visible = vm.getVisibleType(source)
+
+
+
+    -- variable collectVars(global, results) --
+    local result = {
+        name    = global:getCodeName(),
+        type    = 'variable',
+        desc    = nil,
+        defines = {},
+    }
+
+    --for each place where this variable is defined:
+    result.defines[#result.defines+1] = {
+        type    = set.type,
+        file    = guide.getUri(set),
+        start   = set.start,
+        finish  = set.finish,
+        extends = packObject(set.value),
+    }
+    result.desc = result.desc or getDesc(set)
+    result.rawdesc = result.rawdesc or getDesc(set, true)
+    result.defines[#result.defines].extends['desc'] = getDesc(set)
+    result.defines[#result.defines].extends['rawdesc'] = getDesc(set, true)
+    if vm.isAsync(set, true) then
+        result.defines[#result.defines].extends['async'] = true
+    end
+    local depr = vm.getDeprecated(set)
+    if (depr and not depr.versions) then
+        result.defines[#result.defines].extends['deprecated'] = true
+    end
+end
+]]
+
 
 ---@async
 local function packObject(source, mark)
@@ -106,6 +214,150 @@ local function getExtends(source)
     end
 end
 
+---@class doc
+---@field type string
+---@field desc string ?
+---@field rawdesc string ?
+
+--- makes a new class export table.
+---@param global_context vm.global
+---@return doc.class
+local function createType(global_context)
+    ---@class doc.class : doc
+    ---@field name string
+    ---@field fields doc.field[]
+    ---@field defines doc.definition[]
+    return {
+        name = global_context.name,
+        type = 'type',
+        desc = nil,
+        rawdesc = nil,
+        defines = {},
+        fields = {},
+    }
+end
+
+--- makes a new variable export table.
+---@param global_context vm.global
+---@return doc.variable
+local function createVariable(global_context)
+    ---@class doc.variable : doc
+    ---@field name string
+    ---@field defines doc.definition[]
+    return { 
+        name    = global_context:getCodeName(),
+        type    = 'variable',
+        desc    = nil,
+        rawdesc = nil,
+        defines = {},
+    }
+end
+
+--- makes a new definition table.
+---@param set parser.object
+---@return doc.definition
+local function createDefinition(set)
+    ---@class doc.definition : doc
+    ---@field file string
+    ---@field start integer
+    ---@field finish integer
+    ---@field extends table ?
+    ---@field async boolean
+    ---@field deprecated boolean
+    return {
+        type = set.type,
+        file = guide.getUri(set),
+        start = set.start,
+        finish = set.finish,
+        extends = getExtends(set),
+        desc = getDesc(set), -- result.desc = result.desc or getDesc(set)
+        rawdesc = getDesc(set, true), -- result.rawdesc = result.rawdesc or getDesc(set, true)
+        --result.defines[#result.defines].extends['desc'] = getDesc(set)
+        --result.defines[#result.defines].extends['rawdesc'] = getDesc(set, true)
+        async = vm.isAsync(set, true) and true or false, --if vm.isAsync(set, true) then result.defines[#result.defines].extends['async'] = true end
+        deprecated = vm.getDeprecated(set) and true or false, --  if (depr and not depr.versions) the result.defines[#result.defines].extends['deprecated'] = true end
+    }
+end
+
+--- makes a new field table
+---@param source parser.object
+---@return doc.field
+local function createField(source)
+    ---@class doc.field : doc
+    ---@field name string
+    ---@field file string
+    ---@field start integer
+    ---@field finish integer
+    ---@field extends table ?
+    ---@field async boolean
+    ---@field deprecated boolean
+
+    local name
+    ---@todo: sort this out, make it nice, maybe? it works as is...
+    if source.type == 'doc.field' then --field? index
+        if source.field.type == 'doc.field.name' then
+            name = source.field[1]
+        else
+            name = ('[%s]'):format(vm.getInfer(source.field):view(ws.rootUri))
+        end
+
+    elseif source.type == 'setfield'
+        or source.type == 'setmethod' then --method? index
+        name = (source.field or source.method)[1]
+
+    elseif source.type == 'tableindex' then --table index
+        name = source.index[1]
+    end
+
+    return { ---@class doc.field
+        name = name,
+        type = source.type,
+        file = guide.getUri(source),
+        start = source.start,
+        finish = source.finish,
+        desc = getDesc(source), --these stay here since only one def?
+        rawdesc = getDesc(source, true), --these stay here since only one def?
+        extends = packObject(source.value),
+        visible = vm.getVisibleType(source),
+        async = vm.isAsync(source, true) and true or false, --if vm.isAsync(source, true) then field.async = true end
+        deprecated = (depr and not depr.versions) and true or false --if (depr and not depr.versions) then field.deprecated = true end
+    }
+end
+
+--true if in blacklist, removes leading full file path 
+local blacklist = {".vscode/", "Kristal/mods/", "Kristal/main.lua", METAPATH}
+--fix blacklist escape patterns https://github.com/lua-nucleo/lua-nucleo/blob/v0.1.0/lua-nucleo/string.lua#L245-L267
+for i, black in ipairs(blacklist) do
+    blacklist[i] = black:gsub(".", {
+        ["^"] = "%^";
+        ["$"] = "%$";
+        ["("] = "%(";
+        [")"] = "%)";
+        ["%"] = "%%";
+        ["."] = "%.";
+        ["["] = "%[";
+        ["]"] = "%]";
+        ["*"] = "%*";
+        ["+"] = "%+";
+        ["-"] = "%-";
+        ["?"] = "%?";
+        ["\0"] = "%z";
+    })
+end
+
+---@param path string
+local function checkAndFixPath(path)
+    for _, black in ipairs(blacklist) do
+        --print(_)
+        if(path:find(black)) then
+            --print("x "..black)
+            return false
+        end
+    end
+    return path:find(DOC) and path
+end
+--------------------------------------------------------
+
 ---@async
 ---@param global vm.global
 ---@param results table
@@ -113,28 +365,16 @@ local function collectTypes(global, results)
     if guide.isBasicType(global.name) then
         return
     end
-    local result = {
-        name    = global.name,
-        type    = 'type',
-        desc    = nil,
-        rawdesc = nil,
-        defines = {},
-        fields  = {},
-    }
+    local result = createType(global)
     for _, set in ipairs(global:getSets(ws.rootUri)) do
         local uri = guide.getUri(set)
         if files.isLibrary(uri) then
             goto CONTINUE
         end
-        result.defines[#result.defines+1] = {
-            type    = set.type,
-            file    = guide.getUri(set),
-            start   = set.start,
-            finish  = set.finish,
-            extends = getExtends(set),
-        }
-        result.desc = result.desc or getDesc(set)
-        result.rawdesc = result.rawdesc or getDesc(set, true)
+        if not checkAndFixPath(guide.getUri(set)) then
+            goto CONTINUE
+        end
+        result.defines[#result.defines+1] = createDefinition(set)
         ::CONTINUE::
     end
     if #result.defines == 0 then
@@ -149,28 +389,19 @@ local function collectTypes(global, results)
     results[#results+1] = result
     ---@async
     ---@diagnostic disable-next-line: not-yieldable
-    vm.getClassFields(ws.rootUri, global, vm.ANY, function (source)
+    vm.getSimpleClassFields(ws.rootUri, global, vm.ANY, function (source, mark, discardParentFields)
+        if(discardParentFields) then return end
+        --assume this is a class and put it on the inheritance stack 
         if source.type == 'doc.field' then
             ---@cast source parser.object
             if files.isLibrary(guide.getUri(source)) then
                 return
             end
-            local field = {}
-            result.fields[#result.fields+1] = field
-            if source.field.type == 'doc.field.name' then
-                field.name = source.field[1]
-            else
-                field.name = ('[%s]'):format(vm.getInfer(source.field):view(ws.rootUri))
+            if not checkAndFixPath(guide.getUri(source)) then
+                return
             end
-            field.type    = source.type
-            field.file    = guide.getUri(source)
-            field.start   = source.start
-            field.finish  = source.finish
-            field.desc    = getDesc(source)
-            field.rawdesc = getDesc(source, true)
-            field.extends = packObject(source.extends)
-            field.visible = vm.getVisibleType(source)
-            return
+
+            result.fields[#result.fields+1] = createField(source)
         end
         if source.type == 'setfield'
         or source.type == 'setmethod' then
@@ -178,24 +409,11 @@ local function collectTypes(global, results)
             if files.isLibrary(guide.getUri(source)) then
                 return
             end
-            local field = {}
-            result.fields[#result.fields+1] = field
-            field.name    = (source.field or source.method)[1]
-            field.type    = source.type
-            field.file    = guide.getUri(source)
-            field.start   = source.start
-            field.finish  = source.finish
-            field.desc    = getDesc(source)
-            field.rawdesc = getDesc(source, true)
-            field.extends = packObject(source.value)
-            field.visible = vm.getVisibleType(source)
-            if vm.isAsync(source, true) then
-                field.async = true
+            if not checkAndFixPath(guide.getUri(source)) then
+                return
             end
-            local depr = vm.getDeprecated(source)
-            if (depr and not depr.versions) then
-                field.deprecated = true
-            end
+
+            result.fields[#result.fields+1] = createField(source)
             return
         end
         if source.type == 'tableindex' then
@@ -206,17 +424,12 @@ local function collectTypes(global, results)
             if files.isLibrary(guide.getUri(source)) then
                 return
             end
-            local field = {}
-            result.fields[#result.fields+1] = field
-            field.name    = source.index[1]
-            field.type    = source.type
-            field.file    = guide.getUri(source)
-            field.start   = source.start
-            field.finish  = source.finish
-            field.desc    = getDesc(source)
-            field.rawdesc = getDesc(source, true)
-            field.extends = packObject(source.value)
-            field.visible = vm.getVisibleType(source)
+
+            if not checkAndFixPath(guide.getUri(source)) then
+                return
+            end
+
+            result.fields[#result.fields+1] = createField(source)
             return
         end
     end)
@@ -235,35 +448,16 @@ end
 ---@param global vm.global
 ---@param results table
 local function collectVars(global, results)
-    local result = {
-        name    = global:getCodeName(),
-        type    = 'variable',
-        desc    = nil,
-        defines = {},
-    }
+    local result = createVariable(global)
     for _, set in ipairs(global:getSets(ws.rootUri)) do
-        if set.type == 'setglobal'
+        local uri = checkAndFixPath(guide.getUri(set))
+        if (set.type == 'setglobal'
         or set.type == 'setfield'
         or set.type == 'setmethod'
-        or set.type == 'setindex' then
-            result.defines[#result.defines+1] = {
-                type    = set.type,
-                file    = guide.getUri(set),
-                start   = set.start,
-                finish  = set.finish,
-                extends = packObject(set.value),
-            }
-            result.desc = result.desc or getDesc(set)
-            result.rawdesc = result.rawdesc or getDesc(set, true)
-            result.defines[#result.defines].extends['desc'] = getDesc(set)
-            result.defines[#result.defines].extends['rawdesc'] = getDesc(set, true)
-            if vm.isAsync(set, true) then
-                result.defines[#result.defines].extends['async'] = true
-            end
-            local depr = vm.getDeprecated(set)
-            if (depr and not depr.versions) then
-                result.defines[#result.defines].extends['deprecated'] = true
-            end
+        or set.type == 'setindex')
+        and uri then
+            result.defines[#result.defines+1] = createDefinition(set)
+
         end
     end
     if #result.defines == 0 then
@@ -280,15 +474,15 @@ end
 
 ---Add config settings to JSON output.
 ---@param results table
-local function collectConfig(results)
-    local result = {
-        name = 'LuaLS',
-        type = 'luals.config',
-        DOC = fs.absolute(fs.path(DOC)):string(),
-        defines = {},
-        fields = {}
-    }
-    results[#results+1] = result
+local function makeMetadata(results, globals_count)
+    return {META = {
+        blaclist = blacklist,
+        commit = getCommit(fs.absolute(fs.path(DOC)):string()),
+        count = #results,
+        format = 'LuaLS | skarphtest',
+        root = fs.absolute(fs.path(DOC)):string(),
+        time = os.time(os.date("!*t")),
+    }}
 end
 
 ---@async
@@ -297,7 +491,6 @@ function export.export(outputPath, callback)
     local results = {}
     local globals = vm.getAllGlobals()
 
-    collectConfig(results)
     local max = 0
     for _ in pairs(globals) do
         max = max + 1
@@ -317,12 +510,13 @@ function export.export(outputPath, callback)
         return a.name < b.name
     end)
 
+    table.insert(results, 1, makeMetadata(results, max))
     local docPath = outputPath .. '/doc.json'
     jsonb.supportSparseArray = true
     util.saveFile(docPath, jsonb.beautify(results))
 
-    local mdPath = doc2md.buildMD(outputPath)
-    return docPath, mdPath
+    --local mdPath = doc2md.buildMD(outputPath)
+    return docPath, "no markdown"
 end
 
 function export.getDocOutputPath()
@@ -456,7 +650,7 @@ function export.runCLI()
 
         print(lang.script('CLI_DOC_DONE'
             , ('[%s](%s)'):format(files.normalize(docPath), furi.encode(docPath))
-            , ('[%s](%s)'):format(files.normalize(mdPath),  furi.encode(mdPath))
+            , ('[x]'):format(files.normalize(mdPath),  furi.encode(mdPath))
         ))
     end)
 end
